@@ -2,11 +2,13 @@ package com.haishinkit.media
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.graphics.Rect
 import android.graphics.SurfaceTexture
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
+import android.hardware.camera2.CaptureRequest
 import android.hardware.camera2.params.OutputConfiguration
 import android.hardware.camera2.params.SessionConfiguration
 import android.os.Build
@@ -35,6 +37,16 @@ internal class Camera2Output(
     }
 
     private var device: CameraDevice? = null
+
+    // Retained so a mid-stream zoom change can re-issue the repeating request.
+    @Volatile
+    private var session: CameraCaptureSession? = null
+
+    @Volatile
+    private var requestBuilder: CaptureRequest.Builder? = null
+
+    @Volatile
+    private var zoomRatio: Float = 1f
     private val manager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
     private val executor = Executors.newSingleThreadExecutor()
     private var characteristics: CameraCharacteristics? = null
@@ -68,6 +80,8 @@ internal class Camera2Output(
     fun close() {
         source.screen.removeChild(video)
         device?.close()
+        session = null
+        requestBuilder = null
     }
 
     override fun onSurfaceChanged(surface: Surface?) {
@@ -118,10 +132,12 @@ internal class Camera2Output(
 
     private fun createCaptureSession(surface: Surface) {
         val device = device ?: return
-        val request =
+        val builder =
             device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
                 addTarget(surface)
-            }.build()
+            }
+        requestBuilder = builder
+        applyZoom(builder)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             val outputList =
                 buildList {
@@ -134,8 +150,9 @@ internal class Camera2Output(
                     executor,
                     object : CameraCaptureSession.StateCallback() {
                         override fun onConfigured(session: CameraCaptureSession) {
+                            this@Camera2Output.session = session
                             try {
-                                session.setRepeatingRequest(request, null, null)
+                                session.setRepeatingRequest(builder.build(), null, null)
                             } catch (e: RuntimeException) {
                                 Log.e(TAG, "", e)
                             }
@@ -156,8 +173,9 @@ internal class Camera2Output(
                 surfaces,
                 object : CameraCaptureSession.StateCallback() {
                     override fun onConfigured(session: CameraCaptureSession) {
+                        this@Camera2Output.session = session
                         try {
-                            session.setRepeatingRequest(request, null, null)
+                            session.setRepeatingRequest(builder.build(), null, null)
                         } catch (e: RuntimeException) {
                             Log.e(TAG, "", e)
                         }
@@ -168,6 +186,49 @@ internal class Camera2Output(
                 },
                 handler,
             )
+        }
+    }
+
+    /** Applies the current [zoomRatio] to a capture-request builder. */
+    private fun applyZoom(builder: CaptureRequest.Builder) {
+        val chars = characteristics ?: return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            builder.set(CaptureRequest.CONTROL_ZOOM_RATIO, zoomRatio)
+        } else {
+            val active =
+                chars.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE) ?: return
+            val cropW = (active.width() / zoomRatio).toInt()
+            val cropH = (active.height() / zoomRatio).toInt()
+            val left = (active.width() - cropW) / 2
+            val top = (active.height() - cropH) / 2
+            builder.set(
+                CaptureRequest.SCALER_CROP_REGION,
+                Rect(left, top, left + cropW, top + cropH),
+            )
+        }
+    }
+
+    /**
+     * Sets the digital zoom ratio on the live capture (1.0 = no zoom). Clamped to
+     * the device's supported range, capped at 5x to match the iOS behaviour and
+     * the UI presets.
+     */
+    fun setZoom(ratio: Float) {
+        val chars = characteristics ?: return
+        val maxZoom: Float =
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                chars.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE)?.upper ?: 1f
+            } else {
+                chars.get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM) ?: 1f
+            }
+        zoomRatio = ratio.coerceIn(1f, minOf(maxZoom, 5f))
+        val builder = requestBuilder ?: return
+        val session = session ?: return
+        applyZoom(builder)
+        try {
+            session.setRepeatingRequest(builder.build(), null, null)
+        } catch (e: RuntimeException) {
+            Log.e(TAG, "setZoom failed", e)
         }
     }
 

@@ -82,6 +82,13 @@ class Camera2Source(private val context: Context) : VideoSource {
         open(expect)
     }
 
+    /**
+     * Sets the camera digital zoom ratio on the running capture (1.0 = no zoom).
+     */
+    fun setZoom(ratio: Float) {
+        output?.setZoom(ratio)
+    }
+
     override fun startRunning() {
         if (isRunning.get()) return
         orientationEventListener?.enable()
