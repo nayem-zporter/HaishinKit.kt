@@ -49,6 +49,7 @@ internal class Camera2Output(
     private var zoomRatio: Float = 1f
     private val manager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
     private val executor = Executors.newSingleThreadExecutor()
+    @Volatile
     private var characteristics: CameraCharacteristics? = null
     private val imageOrientation: ImageOrientation
         get() {
@@ -153,7 +154,7 @@ internal class Camera2Output(
                             this@Camera2Output.session = session
                             try {
                                 session.setRepeatingRequest(builder.build(), null, null)
-                            } catch (e: RuntimeException) {
+                            } catch (e: Exception) {
                                 Log.e(TAG, "", e)
                             }
                         }
@@ -176,7 +177,7 @@ internal class Camera2Output(
                         this@Camera2Output.session = session
                         try {
                             session.setRepeatingRequest(builder.build(), null, null)
-                        } catch (e: RuntimeException) {
+                        } catch (e: Exception) {
                             Log.e(TAG, "", e)
                         }
                     }
@@ -199,8 +200,10 @@ internal class Camera2Output(
                 chars.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE) ?: return
             val cropW = (active.width() / zoomRatio).toInt()
             val cropH = (active.height() / zoomRatio).toInt()
-            val left = (active.width() - cropW) / 2
-            val top = (active.height() - cropH) / 2
+            // Anchor at the active-array origin (not 0,0) — some sensors report a
+            // non-zero SENSOR_INFO_ACTIVE_ARRAY_SIZE left/top.
+            val left = active.left() + (active.width() - cropW) / 2
+            val top = active.top() + (active.height() - cropH) / 2
             builder.set(
                 CaptureRequest.SCALER_CROP_REGION,
                 Rect(left, top, left + cropW, top + cropH),
@@ -221,14 +224,21 @@ internal class Camera2Output(
             } else {
                 chars.get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM) ?: 1f
             }
-        zoomRatio = ratio.coerceIn(1f, minOf(maxZoom, 5f))
-        val builder = requestBuilder ?: return
-        val session = session ?: return
-        applyZoom(builder)
-        try {
-            session.setRepeatingRequest(builder.build(), null, null)
-        } catch (e: RuntimeException) {
-            Log.e(TAG, "setZoom failed", e)
+        zoomRatio = ratio.coerceIn(1f, maxOf(1f, minOf(maxZoom, 5f)))
+        // Re-issue on the camera executor so all capture-session work (create +
+        // zoom) is serialized on one thread — CaptureRequest.Builder isn't
+        // thread-safe. Catch Exception (not just RuntimeException) because
+        // setRepeatingRequest declares the checked CameraAccessException, which
+        // fires on a camera disconnect and would otherwise crash the caller.
+        executor.execute {
+            val builder = requestBuilder ?: return@execute
+            val session = session ?: return@execute
+            applyZoom(builder)
+            try {
+                session.setRepeatingRequest(builder.build(), null, null)
+            } catch (e: Exception) {
+                Log.e(TAG, "setZoom failed", e)
+            }
         }
     }
 
