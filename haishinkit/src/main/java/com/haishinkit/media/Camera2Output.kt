@@ -202,8 +202,8 @@ internal class Camera2Output(
             val cropH = (active.height() / zoomRatio).toInt()
             // Anchor at the active-array origin (not 0,0) — some sensors report a
             // non-zero SENSOR_INFO_ACTIVE_ARRAY_SIZE left/top.
-            val left = active.left() + (active.width() - cropW) / 2
-            val top = active.top() + (active.height() - cropH) / 2
+            val left = active.left + (active.width() - cropW) / 2
+            val top = active.top + (active.height() - cropH) / 2
             builder.set(
                 CaptureRequest.SCALER_CROP_REGION,
                 Rect(left, top, left + cropW, top + cropH),
